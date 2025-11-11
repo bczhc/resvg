@@ -1287,79 +1287,31 @@ pub(crate) fn shape_text(
     let mut glyphs = shape_text_with_font(text, font.clone(), small_caps, apply_kerning, fontdb)
         .unwrap_or_default();
 
-    // Remember all fonts used for shaping.
-    let mut used_fonts = vec![font.id];
-
-    // Loop until all glyphs become resolved or until no more fonts are left.
-    'outer: loop {
-        let mut missing = None;
-        for glyph in &glyphs {
-            if glyph.is_missing() {
-                missing = Some(glyph.byte_idx.char_from(text));
-                break;
-            }
-        }
-
-        if let Some(c) = missing {
-            let fallback_font = match (resolver.select_fallback)(c, &used_fonts, fontdb)
-                .and_then(|id| fontdb.load_font(id))
-            {
-                Some(v) => Arc::new(v),
-                None => break 'outer,
+    for g in glyphs.iter_mut() {
+        let char = g.byte_idx.char_from(text);
+        if g.is_missing() {
+            // TODO: select fallback for a cluster instead of a glyph
+            //  it can happen that a cluster gets break into different fonts, though very rarely?
+            let Some(resolved) = (resolver.select_fallback)(char, &[font.id], fontdb)
+                .and_then(|id| fontdb.load_font(id)) else {
+                log::warn!(
+                    "No fonts with a {}/U+{:X} character were found.",
+                    char,
+                    char as u32
+                );
+                continue;
             };
-
-            // Shape again, using a new font.
-            let fallback_glyphs = shape_text_with_font(
-                text,
-                fallback_font.clone(),
-                small_caps,
-                apply_kerning,
-                fontdb,
-            )
-            .unwrap_or_default();
-
-            let all_matched = fallback_glyphs.iter().all(|g| !g.is_missing());
-            if all_matched {
-                // Replace all glyphs when all of them were matched.
-                glyphs = fallback_glyphs;
-                break 'outer;
+            let reshaped = shape_text_with_font(&g.text, Arc::new(resolved), small_caps, apply_kerning, fontdb)
+                .unwrap_or_default().into_iter().next();
+            if let Some(new_glyph) = reshaped {
+                *g = Glyph {
+                    byte_idx: g.byte_idx,
+                    ..new_glyph
+                };
             }
-
-            // We assume, that shaping with an any font will produce the same amount of glyphs.
-            // This is incorrect, but good enough for now.
-            if glyphs.len() != fallback_glyphs.len() {
-                break 'outer;
-            }
-
-            // TODO: Replace clusters and not glyphs. This should be more accurate.
-
-            // Copy new glyphs.
-            for i in 0..glyphs.len() {
-                if glyphs[i].is_missing() && !fallback_glyphs[i].is_missing() {
-                    glyphs[i] = fallback_glyphs[i].clone();
-                }
-            }
-
-            // Remember this font.
-            used_fonts.push(fallback_font.id);
-        } else {
-            break 'outer;
         }
     }
-
-    // Warn about missing glyphs.
-    for glyph in &glyphs {
-        if glyph.is_missing() {
-            let c = glyph.byte_idx.char_from(text);
-            // TODO: print a full grapheme
-            log::warn!(
-                "No fonts with a {}/U+{:X} character were found.",
-                c,
-                c as u32
-            );
-        }
-    }
-
+    println!("{:?}", glyphs);
     glyphs
 }
 
@@ -1515,7 +1467,7 @@ pub(crate) fn script_supports_letter_spacing(script: unicode_script::Script) -> 
 /// A glyph.
 ///
 /// Basically, a glyph ID and it's metrics.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Glyph {
     /// The glyph ID in the font.
     pub(crate) id: GlyphId,
@@ -1720,7 +1672,7 @@ pub(crate) type FontsCache = HashMap<Font, Arc<ResolvedFont>>;
 /// A read-only text index in bytes.
 ///
 /// Guarantee to be on a char boundary and in text bounds.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub(crate) struct ByteIndex(usize);
 
 impl ByteIndex {
